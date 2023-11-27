@@ -1510,16 +1510,18 @@ where
 
                     // fetch respective value, place it in the entries
                     let next_token = dataset.next().context(MissingElementValueSnafu)?;
-                    if header.tag == Tag(0x0010, 0x0010) {
-                        info!("next tokne: {:?}", next_token);
-                    }
                     match next_token.context(ReadTokenSnafu)? {
-                        DataToken::PrimitiveValue(v) => InMemElement::new_with_len(
-                            header.tag,
-                            header.vr,
-                            header.len,
-                            Value::Primitive(v),
-                        ),
+                        DataToken::PrimitiveValue(v) => {
+                            if header.tag == Tag(0x0010, 0x0010) {
+                                info!("next token: {:?}", v);
+                            }
+                            InMemElement::new_with_len(
+                                header.tag,
+                                header.vr,
+                                header.len,
+                                Value::Primitive(v),
+                            )
+                        }
                         token => {
                             return UnexpectedTokenSnafu { token }.fail();
                         }

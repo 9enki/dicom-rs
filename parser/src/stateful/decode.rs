@@ -439,6 +439,61 @@ where
         Ok(PrimitiveValue::Strs(parts?))
     }
 
+    fn convert_to_iso2022jp(&mut self, input: &str) -> String {
+        // ISO 2022 JPへの変換ロジックをここに実装
+        // この例では単純に入力文字列を返す
+        input.to_string()
+    }
+
+    fn read_value_pn(
+        &mut self,
+        header: &DataElementHeader,
+        specific_char_set: &SpecificCharacterSet,
+    ) -> Result<PrimitiveValue> {
+        let len = self.require_known_length(header)?;
+        self.buffer.resize_with(len, Default::default);
+        self.from
+            .read_exact(&mut self.buffer)
+            .context(ReadValueDataSnafu {
+                position: self.position,
+            })?;
+
+        // "="の位置を特定
+        let equal_positions: Vec<_> = self
+            .buffer
+            .iter()
+            .enumerate()
+            .filter(|&(_, &b)| b == b'=')
+            .map(|(i, _)| i)
+            .collect();
+
+        if equal_positions.len() == 0 {
+            return self.read_value_str(header);
+        }
+
+        let mut binary_data = Vec::new();
+        let mut equal_position = 0;
+        for &index in &equal_positions {
+            binary_data.push(&self.buffer[equal_position..index]);
+            equal_position = index + 1;
+        }
+        binary_data.push(&self.buffer[equal_position..]);
+
+        let mut decoded_parts = Vec::new();
+        for (i, part) in binary_data.iter().enumerate() {
+            let charset = match i {
+                0 => specific_char_set,
+                _ => &SpecificCharacterSet::IsoIr87,
+            };
+            let decoded = charset.decode(part).context(DecodeTextSnafu {
+                position: self.position,
+            })?;
+            decoded_parts.push(decoded);
+        }
+
+        Ok(PrimitiveValue::Strs(decoded_parts.into()))
+    }
+
     fn read_value_str(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
         let len = self.require_known_length(header)?;
 
@@ -910,6 +965,8 @@ where
             return Ok(PrimitiveValue::Empty);
         }
 
+        let specific_char_set = self.text.clone();
+
         match header.vr() {
             VR::SQ => {
                 // sequence objects should not head over here, they are
@@ -920,9 +977,8 @@ where
                 .fail()
             }
             VR::AT => self.read_value_tag(header),
-            VR::AE | VR::AS | VR::PN | VR::SH | VR::LO | VR::UC | VR::UI => {
-                self.read_value_strs(header)
-            }
+            VR::AE | VR::AS | VR::SH | VR::LO | VR::UC | VR::UI => self.read_value_strs(header),
+            VR::PN => self.read_value_pn(header, &specific_char_set),
             VR::CS => self.read_value_cs(header),
             VR::UT | VR::ST | VR::UR | VR::LT => self.read_value_str(header),
             VR::UN | VR::OB => self.read_value_ob(header),
@@ -947,6 +1003,8 @@ where
             return Ok(PrimitiveValue::Empty);
         }
 
+        let specific_char_set = self.text.clone();
+
         match header.vr() {
             VR::SQ => {
                 // sequence objects... should not work
@@ -958,7 +1016,6 @@ where
             VR::AT => self.read_value_tag(header),
             VR::AE
             | VR::AS
-            | VR::PN
             | VR::SH
             | VR::LO
             | VR::UC
@@ -968,6 +1025,7 @@ where
             | VR::DA
             | VR::TM
             | VR::DT => self.read_value_strs(header),
+            VR::PN => self.read_value_pn(header, &specific_char_set),
             VR::CS => self.read_value_cs(header),
             VR::UT | VR::ST | VR::UR | VR::LT => self.read_value_str(header),
             VR::UN | VR::OB => self.read_value_ob(header),
