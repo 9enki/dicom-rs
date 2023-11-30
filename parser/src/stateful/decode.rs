@@ -230,7 +230,7 @@ pub struct StatefulDecoder<D, S, BD = BasicDecoder, TC = SpecificCharacterSet> {
     decoder: D,
     basic: BD,
     text: TC,
-    cs: Vec<TC>,
+    decode_cs: Vec<TC>,
     dt_utc_offset: FixedOffset,
     buffer: Vec<u8>,
     /// the assumed position of the reader source
@@ -292,7 +292,7 @@ where
             basic: LittleEndianBasicDecoder,
             decoder: ExplicitVRLittleEndianDecoder::default(),
             text: DefaultCharacterSetCodec,
-            cs: Vec::new(),
+            decode_cs: Vec::new(),
             dt_utc_offset: FixedOffset::east_opt(0).unwrap(),
             buffer: Vec::with_capacity(PARSER_BUFFER_CAPACITY),
             position: 0,
@@ -324,7 +324,7 @@ where
             basic,
             decoder,
             text,
-            cs: Vec::new(),
+            decode_cs: Vec::new(),
             dt_utc_offset: FixedOffset::east_opt(0).unwrap(),
             buffer: Vec::with_capacity(PARSER_BUFFER_CAPACITY),
             position,
@@ -480,7 +480,7 @@ where
             .map(|(i, _)| i)
             .collect();
 
-        let decoded_parts = if equal_positions.len() == 0 {
+        let decoded_parts = if equal_positions.is_empty() {
             self.read_value_strs_impl(header, len)?
         } else {
             let mut binary_data = Vec::new();
@@ -493,12 +493,12 @@ where
 
             let mut decoded_parts = Vec::new();
 
-            let (cs1, cs2) = match self.cs.len() {
+            let (cs1, cs2) = match self.decode_cs.len() {
                 0 => (&self.text, &self.text),
-                1 => (&self.text, self.cs.get(0).unwrap_or(&self.text)),
+                1 => (&self.text, self.decode_cs.get(0).unwrap_or(&self.text)),
                 _ => (
-                    self.cs.get(0).unwrap_or(&self.text),
-                    self.cs.get(1).unwrap_or(&self.text),
+                    self.decode_cs.get(0).unwrap_or(&self.text),
+                    self.decode_cs.get(1).unwrap_or(&self.text),
                 ),
             };
 
@@ -857,7 +857,11 @@ where
 {
     fn set_character_set(&mut self, charset: SpecificCharacterSet) -> Result<()> {
         self.text = charset;
-        self.cs.push(charset);
+        Ok(())
+    }
+
+    fn set_decode_character_set(&mut self, charset: SpecificCharacterSet) -> Result<()> {
+        self.decode_cs.push(charset);
         Ok(())
     }
 
@@ -883,6 +887,16 @@ where
                         tracing::warn!("Unsupported character set `{}`, ignoring", name);
                         tracing::warn!("Error: {}", e);
                     });
+                    self.set_decode_character_set(charset).unwrap_or_else(|e| {
+                        tracing::warn!("Unsupported character set `{}`, ignoring", name);
+                        tracing::warn!("Error: {}", e);
+                    });
+                } else {
+                    self.set_decode_character_set(SpecificCharacterSet::Default)
+                        .unwrap_or_else(|e| {
+                            tracing::warn!("Unsupported character set `{}`, ignoring", name);
+                            tracing::warn!("Error: {}", e);
+                        });
                 }
             });
         }
