@@ -21,6 +21,7 @@ use snafu::{Backtrace, OptionExt, ResultExt, Snafu};
 use std::io::Read;
 use std::iter::Iterator;
 use std::{fmt::Debug, io::Seek, io::SeekFrom};
+use tracing::warn;
 
 #[derive(Debug, Snafu)]
 #[non_exhaustive]
@@ -225,7 +226,10 @@ const PARSER_BUFFER_CAPACITY: usize = 2048;
 /// whereas `DB` is the parameter type for the basic decoder.
 /// `TC` defines the text codec used underneath.
 #[derive(Debug)]
-pub struct StatefulDecoder<D, S, BD = BasicDecoder, TC = SpecificCharacterSet> {
+pub struct StatefulDecoder<D, S, BD = BasicDecoder, TC = SpecificCharacterSet>
+where
+    TC: Debug,
+{
     from: S,
     decoder: D,
     basic: BD,
@@ -303,7 +307,7 @@ where
 impl<D, S, BD, TC> StatefulDecoder<D, S, BD, TC>
 where
     BD: BasicDecode,
-    TC: TextCodec,
+    TC: Debug + TextCodec,
 {
     /// Create a new DICOM stateful decoder from its parts.
     #[inline]
@@ -336,7 +340,7 @@ impl<D, S, BD, TC> StatefulDecoder<D, S, BD, TC>
 where
     S: Seek,
     BD: BasicDecode,
-    TC: TextCodec,
+    TC: Debug + TextCodec,
 {
     /// Create a new DICOM stateful decoder from its parts,
     /// while determining the data source's current position via `seek`.
@@ -358,7 +362,7 @@ where
     D: DecodeFrom<S>,
     BD: BasicDecode,
     S: Read,
-    TC: TextCodec,
+    TC: Debug + TextCodec,
 {
     // ---------------- private methods ---------------------
 
@@ -461,7 +465,7 @@ where
 
     fn read_value_pn(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
         match self.read_value_pns(header) {
-            Ok(PrimitiveValue::Strs(parts)) => Ok(PrimitiveValue::Str(parts.join("="))),
+            Ok(PrimitiveValue::Strs(parts)) => Ok(PrimitiveValue::Str(parts.join(""))),
             Ok(_) => {
                 panic!("wron impl: read_value_pns should always return Strs")
             }
@@ -470,50 +474,72 @@ where
     }
 
     fn read_value_pns(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
-        let len = self.read_element_data(header)?;
+        self.read_element_data(header)?;
 
-        let equal_positions: Vec<_> = self
-            .buffer
-            .iter()
-            .enumerate()
-            .filter(|&(_, &b)| b == b'=')
-            .map(|(i, _)| i)
-            .collect();
+        let escape = 0x1B;
 
-        let decoded_parts = if equal_positions.is_empty() {
-            self.read_value_strs_impl(header, len)?
-        } else {
-            let mut binary_data = Vec::new();
-            let mut equal_position = 0;
-            for &index in &equal_positions {
-                binary_data.push(&self.buffer[equal_position..index]);
-                equal_position = index + 1;
+        let mut split_buffers: Vec<Vec<u8>> = Vec::new();
+        let mut temp: Vec<u8> = Vec::new();
+
+        self.buffer.clone().iter().for_each(|byte| {
+            if *byte == escape {
+                split_buffers.push(temp.clone());
+                temp.clear();
             }
-            binary_data.push(&self.buffer[equal_position..]);
+            temp.push(*byte);
+        });
 
-            let mut decoded_parts = Vec::new();
+        if !split_buffers.is_empty() {
+            let mut decoded_parts: Vec<String> = Vec::new();
 
-            let (cs1, cs2) = match self.decode_cs.len() {
-                0 => (&self.text, &self.text),
-                1 => (&self.text, self.decode_cs.get(0).unwrap_or(&self.text)),
-                _ => (
-                    self.decode_cs.get(0).unwrap_or(&self.text),
-                    self.decode_cs.get(1).unwrap_or(&self.text),
-                ),
-            };
+            for (i, buffer) in split_buffers.iter().enumerate() {
+                if i == 0 {
+                    let decoded =
+                        self.decode_cs
+                            .get(0)
+                            .unwrap()
+                            .decode(buffer)
+                            .context(DecodeTextSnafu {
+                                position: self.position,
+                            })?;
+                    decoded_parts.push(decoded);
+                } else {
+                    let (sliced_buffer, charset) = match &buffer[..] {
+                        [0x1B, 0x24, 0x42, ..] => (buffer.to_vec(), SpecificCharacterSet::IsoIr87),
+                        [0x1B, 0x28, 0x42, ..] => {
+                            (buffer[3..].to_vec(), SpecificCharacterSet::default())
+                        }
+                        [0x1B, 0x29, 0x49, ..] => {
+                            (buffer[3..].to_vec(), SpecificCharacterSet::IsoIr13)
+                        }
+                        [0x1B, 0x28, 0x4A, ..] => {
+                            (buffer[3..].to_vec(), SpecificCharacterSet::IsoIr13)
+                        }
+                        _ => {
+                            warn!("unknown escape: {:?}", buffer);
+                            (buffer.to_vec(), SpecificCharacterSet::default())
+                        }
+                    };
+                    let decoded = charset.decode(&sliced_buffer).context(DecodeTextSnafu {
+                        position: self.position,
+                    })?;
+                    decoded_parts.push(decoded);
+                }
+            }
 
-            for (i, part) in binary_data.iter().enumerate() {
-                let charset = if i == 0 { cs1 } else { cs2 };
-                let decoded = charset.decode(part).context(DecodeTextSnafu {
+            Ok(PrimitiveValue::Strs(decoded_parts.into()))
+        } else {
+            let decoded: String = self
+                .decode_cs
+                .get(0)
+                .unwrap_or(&self.text)
+                .decode(&self.buffer)
+                .context(DecodeTextSnafu {
                     position: self.position,
                 })?;
-                decoded_parts.push(decoded);
-            }
 
-            decoded_parts
-        };
-
-        Ok(PrimitiveValue::Strs(decoded_parts.into()))
+            Ok(PrimitiveValue::Strs(vec![decoded].into()))
+        }
     }
 
     fn read_value_str(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
@@ -857,6 +883,7 @@ where
 {
     fn set_character_set(&mut self, charset: SpecificCharacterSet) -> Result<()> {
         self.text = charset;
+        self.set_decode_character_set(charset).unwrap();
         Ok(())
     }
 
@@ -882,22 +909,9 @@ where
             // unsupported specific character sets should probably be considered
             // in the future. See #40 for discussion.
             parts.iter().for_each(|name| {
-                if let Some(charset) = SpecificCharacterSet::from_code(name) {
-                    self.set_character_set(charset).unwrap_or_else(|e| {
-                        tracing::warn!("Unsupported character set `{}`, ignoring", name);
-                        tracing::warn!("Error: {}", e);
-                    });
-                    self.set_decode_character_set(charset).unwrap_or_else(|e| {
-                        tracing::warn!("Unsupported character set `{}`, ignoring", name);
-                        tracing::warn!("Error: {}", e);
-                    });
-                } else {
-                    self.set_decode_character_set(SpecificCharacterSet::Default)
-                        .unwrap_or_else(|e| {
-                            tracing::warn!("Unsupported character set `{}`, ignoring", name);
-                            tracing::warn!("Error: {}", e);
-                        });
-                }
+                let charset =
+                    SpecificCharacterSet::from_code(name).unwrap_or(SpecificCharacterSet::Default);
+                self.set_character_set(charset).unwrap();
             });
         }
 
@@ -1612,8 +1626,18 @@ mod tests {
         assert!(result.is_ok());
 
         let value = result.unwrap();
-        let expected: SmallVec<[&str; 3]> =
-            vec!["ﾔﾏﾀ\u{ff9e}^ﾀﾛｳ", "山田^太郎", "ヤマダ^タロウ"].into();
+
+        let expected: SmallVec<[&str; 3]> = vec![
+            "ﾔﾏﾀ\u{ff9e}^ﾀﾛｳ=",
+            "山田",
+            "^",
+            "太郎",
+            "=",
+            "ヤマダ",
+            "^",
+            "タロウ",
+        ]
+        .into();
         match value {
             PrimitiveValue::Strs(s) => {
                 assert_eq!(s, expected);
@@ -1703,8 +1727,17 @@ mod tests {
         assert!(result.is_ok());
 
         let value = result.unwrap();
-        let expected: SmallVec<[&str; 3]> =
-            vec!["Yamada^Taro", "山田^太郎", "ヤマダ^タロウ"].into();
+        let expected: SmallVec<[&str; 3]> = vec![
+            "Yamada^Taro=",
+            "山田",
+            "^",
+            "太郎",
+            "=",
+            "ヤマダ",
+            "^",
+            "タロウ",
+        ]
+        .into();
         match value {
             PrimitiveValue::Strs(s) => {
                 assert_eq!(s, expected);
