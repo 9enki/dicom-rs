@@ -1684,6 +1684,8 @@ mod tests {
         assert!(result.is_ok());
 
         let value = result.unwrap();
+
+        // todo The crate used for encoding should be updated from encoding to encoding_rs
         let expected = "ﾔﾏﾀ\u{ff9e}^ﾀﾛｳ=山田^太郎=ヤマダ^タロウ";
         match value {
             PrimitiveValue::Str(s) => {
