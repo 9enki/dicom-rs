@@ -463,18 +463,18 @@ where
         Ok(PrimitiveValue::Strs(parts.into()))
     }
 
-    fn read_value_pn(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
-        match self.read_value_pns(header) {
+    fn read_multibyte_value(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
+        match self.read_multibyte_values(header) {
             Ok(PrimitiveValue::Strs(parts)) => Ok(PrimitiveValue::Str(parts.join(""))),
             Ok(_) => {
-                panic!("wron impl: read_value_pns should always return Strs")
+                panic!("wron impl: read_multibyte_values should always return Strs")
             }
             Err(e) => Err(e),
         }
     }
 
-    fn read_value_pns(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
-        self.read_element_data(header)?;
+    fn read_multibyte_values(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
+        let len = self.read_element_data(header)?;
 
         let escape = 0x1B;
 
@@ -489,7 +489,7 @@ where
             temp.push(*byte);
         });
 
-        if !split_buffers.is_empty() {
+        let parts = if !split_buffers.is_empty() {
             let mut decoded_parts: Vec<String> = Vec::new();
 
             for (i, buffer) in split_buffers.iter().enumerate() {
@@ -527,7 +527,7 @@ where
                 }
             }
 
-            Ok(PrimitiveValue::Strs(decoded_parts.into()))
+            decoded_parts.into()
         } else {
             let decoded: String = self
                 .decode_cs
@@ -538,8 +538,11 @@ where
                     position: self.position,
                 })?;
 
-            Ok(PrimitiveValue::Strs(vec![decoded].into()))
-        }
+            vec![decoded].into()
+        };
+
+        self.position += len as u64;
+        Ok(PrimitiveValue::Strs(parts))
     }
 
     fn read_value_str(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
@@ -1026,8 +1029,8 @@ where
                 .fail()
             }
             VR::AT => self.read_value_tag(header),
-            VR::AE | VR::AS | VR::SH | VR::LO | VR::UC | VR::UI => self.read_value_strs(header),
-            VR::PN => self.read_value_pns(header),
+            VR::AE | VR::AS | VR::SH | VR::UC | VR::UI => self.read_value_strs(header),
+            VR::PN | VR::LO => self.read_multibyte_values(header),
             VR::CS => self.read_value_cs(header),
             VR::UT | VR::ST | VR::UR | VR::LT => self.read_value_str(header),
             VR::UN | VR::OB => self.read_value_ob(header),
@@ -1064,7 +1067,6 @@ where
             VR::AE
             | VR::AS
             | VR::SH
-            | VR::LO
             | VR::UC
             | VR::UI
             | VR::IS
@@ -1072,7 +1074,7 @@ where
             | VR::DA
             | VR::TM
             | VR::DT => self.read_value_strs(header),
-            VR::PN => self.read_value_pn(header),
+            VR::PN | VR::LO => self.read_multibyte_value(header),
             VR::CS => self.read_value_cs(header),
             VR::UT | VR::ST | VR::UR | VR::LT => self.read_value_str(header),
             VR::UN | VR::OB => self.read_value_ob(header),
@@ -1589,7 +1591,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_value_pn_ps_3_5_h_3_2_multistr() {
+    fn test_read_multibyte_value_ps_3_5_h_3_2_multistr() {
         let yamada_taro_sjis = SHIFT_JIS.encode("ﾔﾏﾀﾞ^ﾀﾛｳ").0;
         let equal_ascii = b"=";
         let yamada_taro_iso2022jp = ISO_2022_JP.encode("山田^太郎").0;
@@ -1647,7 +1649,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_value_pn_ps_3_5_h_3_2() {
+    fn test_read_multibyte_value_ps_3_5_h_3_2() {
         let yamada_taro_sjis = SHIFT_JIS.encode("ﾔﾏﾀﾞ^ﾀﾛｳ").0;
         let equal_ascii = b"=";
         let yamada_taro_iso2022jp = ISO_2022_JP.encode("山田^太郎").0;
@@ -1695,7 +1697,7 @@ mod tests {
         }
     }
     #[test]
-    fn test_read_value_pn_ps_3_5_h_3_1_multistr() {
+    fn test_read_multibyte_value_ps_3_5_h_3_1_multistr() {
         let yamada_taro_sjis = UTF_8.encode("Yamada^Taro").0;
         let equal_ascii = b"=";
         let yamada_taro_iso2022jp = ISO_2022_JP.encode("山田^太郎").0;
@@ -1749,7 +1751,7 @@ mod tests {
     }
 
     #[test]
-    fn test_read_value_pn_ps_3_5_h_3_1() {
+    fn test_read_multibyte_value_ps_3_5_h_3_1() {
         let yamada_taro_sjis = UTF_8.encode("Yamada^Taro").0;
         let equal_ascii = b"=";
         let yamada_taro_iso2022jp = ISO_2022_JP.encode("山田^太郎").0;
